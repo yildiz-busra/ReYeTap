@@ -1,0 +1,1 @@
+ ReYeTap is a restaurant management application designed to keep track of meal orders and maintain connectivity among the restaurant staff as well as providing overall reports on daily and periodic income status. This is a three-member group project created as a class assignment. 
