@@ -1,7 +1,12 @@
+//410840 Fadeel Abuobead
+//402515 Büşra Yıldız
+//425510 Ahmed Buğra TİNYOZOĞLU
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define MAX_NAME_LENGTH 50
 #define MAX_MEALS 100
@@ -19,9 +24,11 @@ typedef struct {
     char meal_name[MAX_NAME_LENGTH];
     float price;
     char order_time[MAX_NAME_LENGTH];
-    char prep_time[MAX_NAME_LENGTH];
+    char start_time[MAX_NAME_LENGTH];
+    char end_time[MAX_NAME_LENGTH];
     char user[MAX_NAME_LENGTH];
-    int status;  // 0: waiting, 1: approved, -1: rejected
+    int status;  // 0: waiting, 1: approved, 2: completed, -1: rejected, 3: preparing
+    int chef_id;
 } Order;
 
 Meal meal_list[MAX_MEALS];
@@ -29,13 +36,15 @@ Order order_list[MAX_ORDERS];
 int meal_count = 0;
 int order_count = 0;
 int chef_count = 3;
+int chef_busy[3] = {0}; // Keeps track of which chefs are busy
 
-void load_meals() {
-    FILE *file = fopen("yemeklistesi.txt", "r");
+void load_meals(const char *filename) {
+    FILE *file = fopen(filename, "r");
     if (!file) {
         printf("Error opening meal list file.\n");
         return;
     }
+    meal_count = 0;
     while (fscanf(file, "%s %f %d %d", meal_list[meal_count].name, &meal_list[meal_count].price,
                   &meal_list[meal_count].prep_time, &meal_list[meal_count].available) != EOF) {
         meal_count++;
@@ -43,8 +52,8 @@ void load_meals() {
     fclose(file);
 }
 
-void save_meals() {
-    FILE *file = fopen("yemeklistesi.txt", "w");
+void save_meals(const char *filename) {
+    FILE *file = fopen(filename, "w");
     if (!file) {
         printf("Error opening meal list file.\n");
         return;
@@ -55,120 +64,501 @@ void save_meals() {
     fclose(file);
 }
 
-void load_orders() {
-    FILE *file = fopen("siparisler.txt", "r");
+void load_orders(const char *filename) {
+    FILE *file = fopen(filename, "r");
     if (!file) {
         printf("Error opening orders file.\n");
         return;
     }
-    while (fscanf(file, "%s %s %f %s %s %s %d", order_list[order_count].id, order_list[order_count].meal_name, 
-                  &order_list[order_count].price, order_list[order_count].order_time, 
-                  order_list[order_count].prep_time, order_list[order_count].user, 
-                  &order_list[order_count].status) != EOF) {
+    order_count = 0;
+    while (fscanf(file, "%s %s %f %s %s %s %s %d %d", order_list[order_count].id, order_list[order_count].meal_name,
+                  &order_list[order_count].price, order_list[order_count].order_time,
+                  order_list[order_count].start_time, order_list[order_count].end_time, order_list[order_count].user,
+                  &order_list[order_count].status, &order_list[order_count].chef_id) != EOF) {
         order_count++;
     }
     fclose(file);
 }
 
-void save_orders() {
-    FILE *file = fopen("siparisler.txt", "w");
+void save_orders(const char *filename) {
+    FILE *file = fopen(filename, "w");
     if (!file) {
-        printf("Error opening orders file.\n");
+        printf("Error creating orders file.\n");
         return;
     }
     for (int i = 0; i < order_count; i++) {
-        fprintf(file, "%s %s %.2f %s %s %s %d\n", order_list[i].id, order_list[i].meal_name, order_list[i].price, 
-                order_list[i].order_time, order_list[i].prep_time, order_list[i].user, order_list[i].status);
+        fprintf(file, "%s %s %.2f %s %s %s %s %d %d\n", order_list[i].id, order_list[i].meal_name,
+                order_list[i].price, order_list[i].order_time, order_list[i].start_time,
+                order_list[i].end_time, order_list[i].user, order_list[i].status, order_list[i].chef_id);
     }
     fclose(file);
 }
 
-void save_order(Order *order) {
-    FILE *file = fopen("siparisler.txt", "a");
-    if (!file) {
-        printf("Error opening orders file.\n");
-        return;
-    }
-    fprintf(file, "%s %s %.2f %s %s %s %d\n", order->id, order->meal_name, order->price, order->order_time,
-            order->prep_time, order->user, order->status);
-    fclose(file);
+char *generate_order_id() {
+    static char id[MAX_NAME_LENGTH];
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    int day = t->tm_mday;
+    int month = t->tm_mon + 1; // tm_mon is 0-based
+    int year = t->tm_year % 100; // tm_year is years since 1900
+    snprintf(id, MAX_NAME_LENGTH, "SIP%02d%02d%02d%03d", day, month, year, (order_count + 1) % 1000);
+    return id;
 }
 
-void place_order(char *user) {
-    char meal_name[MAX_NAME_LENGTH];
-    int meal_index = -1;
-    printf("Enter meal name to order: ");
-    scanf("%s", meal_name);
+void get_current_time(char *buffer, size_t buffer_size) {
+    time_t now = time(NULL);
+    strftime(buffer, buffer_size, "%Y-%m-%d %H:%M:%S", localtime(&now));
+}
 
+const char* get_status_description(int status) {
+    switch (status) {
+        case 0: return "Waiting";
+        case 1: return "Approved";
+        case 2: return "Completed";
+        case -1: return "Rejected";
+        case 3: return "Preparing";
+        default: return "Unknown";
+    }
+}
+
+void view_menu_and_place_order() {
+    printf("Menu:\n");
     for (int i = 0; i < meal_count; i++) {
-        if (strcmp(meal_list[i].name, meal_name) == 0 && meal_list[i].available) {
-            meal_index = i;
+        if (meal_list[i].available) {
+            printf("%d. %s - %.2f TL - Preparation Time: %d minutes\n",
+                   i + 1, meal_list[i].name, meal_list[i].price, meal_list[i].prep_time);
+        }
+    }
+
+    int choice;
+    printf("Enter the number of the meal you want to order (0 to cancel): ");
+    scanf("%d", &choice);
+
+    if (choice > 0 && choice <= meal_count && meal_list[choice - 1].available) {
+        Order new_order;
+        strcpy(new_order.id, generate_order_id());
+        strcpy(new_order.meal_name, meal_list[choice - 1].name);
+        new_order.price = meal_list[choice - 1].price;
+        get_current_time(new_order.order_time, MAX_NAME_LENGTH);
+        strcpy(new_order.start_time, ""); // Start time not set yet
+        strcpy(new_order.end_time, ""); // End time not set yet
+        printf("Enter your name: ");
+        scanf("%s", new_order.user);
+        new_order.status = 0;
+        new_order.chef_id = -1; // Chef not assigned yet
+
+        order_list[order_count] = new_order;
+        order_count++;
+        printf("Order placed successfully!\n");
+
+        save_orders("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\S.txt");
+    } else if (choice == 0) {
+        printf("Order cancelled.\n");
+    } else {
+        printf("Invalid choice or meal not available. Please try again.\n");
+    }
+}
+
+void view_current_order_status(const char *user_name) {
+    int found = 0;
+    for (int i = 0; i < order_count; i++) {
+        if (strcmp(order_list[i].user, user_name) == 0 && (order_list[i].status == 0 || order_list[i].status == 1 || order_list[i].status == 3)) {
+            printf("Current Order ID: %s\n", order_list[i].id);
+            printf("Meal: %s\n", order_list[i].meal_name);
+            printf("Price: %.2f TL\n", order_list[i].price);
+            printf("Order Time: %s\n", order_list[i].order_time);
+            if (order_list[i].status == 3) {
+                printf("Start Time: %s\n", order_list[i].start_time);
+            }
+            printf("Status: %s\n", get_status_description(order_list[i].status));
+            if (order_list[i].status == 1 || order_list[i].status == 3) {
+                printf("Chef ID: %d\n", order_list[i].chef_id);
+            }
+            found = 1;
             break;
         }
     }
+    if (!found) {
+        printf("No current orders found.\n");
+    }
+}
 
-    if (meal_index == -1) {
-        printf("Meal not available.\n");
+void view_previous_orders(const char *user_name) {
+    int found = 0;
+    for (int i = 0; i < order_count; i++) {
+        if (strcmp(order_list[i].user, user_name) == 0 && order_list[i].status == 2) {
+            printf("Order ID: %s\n", order_list[i].id);
+            printf("Meal: %s\n", order_list[i].meal_name);
+            printf("Price: %.2f TL\n", order_list[i].price);
+            printf("Order Time: %s\n", order_list[i].order_time);
+            printf("Start Time: %s\n", order_list[i].start_time);
+            printf("End Time: %s\n", order_list[i].end_time);
+            printf("Status: %s\n", get_status_description(order_list[i].status));
+            printf("Chef ID: %d\n", order_list[i].chef_id);
+            found = 1;
+        }
+    }
+    if (!found) {
+        printf("No previous orders found.\n");
+    }
+}
+
+void add_food() {
+    if (meal_count >= MAX_MEALS) {
+        printf("Cannot add more meals. Maximum limit reached.\n");
+        return;
+    }
+    Meal new_meal;
+    printf("Enter food name: ");
+    scanf("%s", new_meal.name);
+    printf("Enter price: ");
+    scanf("%f", &new_meal.price);
+    printf("Enter preparation time (minutes): ");
+    scanf("%d", &new_meal.prep_time);
+    new_meal.available = 1; // New meals are available by default
+    meal_list[meal_count++] = new_meal;
+    save_meals("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\yemeklistesi.txt");
+    printf("Food added successfully.\n");
+}
+
+void update_food() {
+    char name[MAX_NAME_LENGTH];
+    printf("Enter the food name to update: ");
+    scanf("%s", name);
+    for (int i = 0; i < meal_count; i++) {
+        if (strcmp(meal_list[i].name, name) == 0) {
+            printf("Enter new price: ");
+            scanf("%f", &meal_list[i].price);
+            printf("Enter new preparation time (minutes): ");
+            scanf("%d", &meal_list[i].prep_time);
+            printf("Enter availability (1 for available, 0 for not available): ");
+            scanf("%d", &meal_list[i].available);
+            save_meals("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\yemeklistesi.txt");
+            printf("Food updated successfully.\n");
+            return;
+        }
+    }
+    printf("Food not found.\n");
+}
+
+void delete_food() {
+    char name[MAX_NAME_LENGTH];
+    printf("Enter the food name to delete: ");
+    scanf("%s", name);
+    for (int i = 0; i < meal_count; i++) {
+        if (strcmp(meal_list[i].name, name) == 0) {
+            for (int j = i; j < meal_count - 1; j++) {
+                meal_list[j] = meal_list[j + 1];
+            }
+            meal_count--;
+            save_meals("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\yemeklistesi.txt");
+            printf("Food deleted successfully.\n");
+            return;
+        }
+    }
+    printf("Food not found.\n");
+}
+
+void approve_or_reject_orders() {
+    int unapproved_count = 0;
+    for (int i = 0; i < order_count; i++) {
+        if (order_list[i].status == 0) { // Only consider waiting orders
+            printf("%d. Order ID: %s, Meal: %s, User: %s\n", unapproved_count + 1, order_list[i].id, order_list[i].meal_name, order_list[i].user);
+            unapproved_count++;
+        }
+    }
+
+    if (unapproved_count == 0) {
+        printf("No unapproved orders found.\n");
         return;
     }
 
-    Order order;
-    snprintf(order.id, sizeof(order.id), "SIP%ld_%03d", time(NULL), order_count + 1);
-    strcpy(order.meal_name, meal_list[meal_index].name);
-    order.price = meal_list[meal_index].price;
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    strftime(order.order_time, sizeof(order.order_time) - 1, "%d-%m-%Y %H:%M", t);
-    strftime(order.prep_time, sizeof(order.prep_time) - 1, "%d-%m-%Y %H:%M", t);
-    strcpy(order.user, user);
-    order.status = 0;
+    int choice;
+    printf("Enter the number of the order to approve/reject (0 to cancel): ");
+    scanf("%d", &choice);
 
-    order_list[order_count++] = order;
-    save_order(&order);
+    if (choice > 0 && choice <= unapproved_count) {
+        int index = -1;
+        unapproved_count = 0;
+        for (int i = 0; i < order_count; i++) {
+            if (order_list[i].status == 0) {
+                unapproved_count++;
+                if (unapproved_count == choice) {
+                    index = i;
+                    break;
+                }
+            }
+        }
 
-    printf("Order placed: %s, %s, %.2f TL\n", order.id, order.meal_name, order.price);
+        if (index != -1) {
+            printf("Approve (1) or Reject (0) this order: ");
+            int decision;
+            scanf("%d", &decision);
+            if (decision == 1) {
+                order_list[index].status = 1; // Approved
+                printf("Order approved.\n");
+            } else if (decision == 0) {
+                order_list[index].status = -1; // Rejected
+                printf("Order rejected.\n");
+            } else {
+                printf("Invalid decision.\n");
+            }
+        }
+    } else if (choice == 0) {
+        printf("Action cancelled.\n");
+    } else {
+        printf("Invalid choice. Please try again.\n");
+    }
+
+    save_orders("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\S.txt");
 }
 
-void view_orders(char *user) {
+void generate_daily_report() {
+    char date[11];
+    printf("Enter the date (YYYY-MM-DD) for the report: ");
+    scanf("%s", date);
+    char filename[200];
+    snprintf(filename, sizeof(filename), "C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\daily_report_%s.txt", date);
+
+    FILE *report_file = fopen(filename, "w");
+    if (!report_file) {
+        printf("Error creating report file.\n");
+        return;
+    }
+
+    fprintf(report_file, "Order ID         Food Name    Food Price    Order Time           Preparation Time  User   Chef\n");
+
+    double total_earnings = 0.0;
+    int user_order_count[MAX_ORDERS] = {0};
+    char users[MAX_ORDERS][MAX_NAME_LENGTH];
+    int unique_user_count = 0;
+
     for (int i = 0; i < order_count; i++) {
-        if (strcmp(order_list[i].user, user) == 0) {
-            printf("Order ID: %s, Meal: %s, Price: %.2f TL, Order Time: %s, Preparation Time: %s, Status: %d\n",
-                   order_list[i].id, order_list[i].meal_name, order_list[i].price, order_list[i].order_time,
-                   order_list[i].prep_time, order_list[i].status);
+        if (strncmp(order_list[i].order_time, date, 10) == 0) { // Match the date
+            double prep_time_diff = 0.0;
+            if (strcmp(order_list[i].start_time, "") != 0 && strcmp(order_list[i].end_time, "") != 0) {
+                struct tm start_tm = {0}, end_tm = {0};
+
+                sscanf(order_list[i].start_time, "%d-%d-%d %d:%d:%d",
+                       &start_tm.tm_year, &start_tm.tm_mon, &start_tm.tm_mday,
+                       &start_tm.tm_hour, &start_tm.tm_min, &start_tm.tm_sec);
+                sscanf(order_list[i].end_time, "%d-%d-%d %d:%d:%d",
+                       &end_tm.tm_year, &end_tm.tm_mon, &end_tm.tm_mday,
+                       &end_tm.tm_hour, &end_tm.tm_min, &end_tm.tm_sec);
+
+                start_tm.tm_year -= 1900;
+                start_tm.tm_mon -= 1;
+                end_tm.tm_year -= 1900;
+                end_tm.tm_mon -= 1;
+
+                time_t start_time = mktime(&start_tm);
+                time_t end_time = mktime(&end_tm);
+                prep_time_diff = difftime(end_time, start_time) / 60.0; // Difference in minutes
+            }
+            fprintf(report_file, "%-16s %-12s %-12.2f %-19s %-18.2f %-6s A%d\n", order_list[i].id, order_list[i].meal_name,
+                    order_list[i].price, order_list[i].order_time, prep_time_diff,
+                    order_list[i].user, order_list[i].chef_id);
+            total_earnings += order_list[i].price;
+
+            // Track user orders
+            int user_found = 0;
+            for (int j = 0; j < unique_user_count; j++) {
+                if (strcmp(users[j], order_list[i].user) == 0) {
+                    user_order_count[j]++;
+                    user_found = 1;
+                    break;
+                }
+            }
+            if (!user_found) {
+                strcpy(users[unique_user_count], order_list[i].user);
+                user_order_count[unique_user_count]++;
+                unique_user_count++;
+            }
         }
     }
-}
 
-void view_menu() {
-    for (int i = 0; i < meal_count; i++) {
-        if (meal_list[i].available) {
-            printf("Meal: %s, Price: %.2f TL, Preparation Time: %d minutes\n",
-                   meal_list[i].name, meal_list[i].price, meal_list[i].prep_time);
+    // Determine the most ordered user
+    int max_orders = 0;
+    char most_ordered_user[MAX_NAME_LENGTH] = "None";
+    for (int i = 0; i < unique_user_count; i++) {
+        if (user_order_count[i] > max_orders) {
+            max_orders = user_order_count[i];
+            strcpy(most_ordered_user, users[i]);
         }
     }
+
+    fprintf(report_file, "\nTotal Earnings for %s: %.2f TL\n", date, total_earnings);
+    fprintf(report_file, "Most Ordered User: %s with %d orders\n", most_ordered_user, max_orders);
+
+    fclose(report_file);
+    printf("Daily report generated: %s\n", filename);
 }
 
-void customer_application() {
-    char user[MAX_NAME_LENGTH];
-    printf("Enter your username: ");
-    scanf("%s", user);
+void generate_periodic_report() {
+    char start_date[11], end_date[11];
+    printf("Enter the start date (YYYY-MM-DD): ");
+    scanf("%s", start_date);
+    printf("Enter the end date (YYYY-MM-DD): ");
+    scanf("%s", end_date);
+
+    struct tm start_tm = {0}, end_tm = {0};
+    sscanf(start_date, "%d-%d-%d", &start_tm.tm_year, &start_tm.tm_mon, &start_tm.tm_mday);
+    sscanf(end_date, "%d-%d-%d", &end_tm.tm_year, &end_tm.tm_mon, &end_tm.tm_mday);
+
+    start_tm.tm_year -= 1900;
+    start_tm.tm_mon -= 1;
+    end_tm.tm_year -= 1900;
+    end_tm.tm_mon -= 1;
+
+    time_t start_time = mktime(&start_tm);
+    time_t end_time = mktime(&end_tm);
+
+    double total_earnings = 0.0;
+
+    for (int i = 0; i < order_count; i++) {
+        struct tm order_tm = {0};
+        sscanf(order_list[i].order_time, "%d-%d-%d %d:%d:%d", &order_tm.tm_year, &order_tm.tm_mon, &order_tm.tm_mday,
+               &order_tm.tm_hour, &order_tm.tm_min, &order_tm.tm_sec);
+
+        order_tm.tm_year -= 1900;
+        order_tm.tm_mon -= 1;
+
+        time_t order_time = mktime(&order_tm);
+
+        if (difftime(order_time, start_time) >= 0 && difftime(end_time, order_time) >= 0) {
+            total_earnings += order_list[i].price;
+        }
+    }
+
+    printf("Total Earnings from %s to %s: %.2f TL\n", start_date, end_date, total_earnings);
+}
+
+void choose_order_to_prepare() {
+    printf("Available orders for preparation:\n");
+    int available_count = 0;
+    for (int i = 0; i < order_count; i++) {
+        if (order_list[i].status == 1 && order_list[i].chef_id == -1) { // Only approved orders without a chef assigned
+            printf("%d. Order ID: %s, Meal: %s, User: %s\n", available_count + 1, order_list[i].id, order_list[i].meal_name, order_list[i].user);
+            available_count++;
+        }
+    }
+
+    if (available_count == 0) {
+        printf("No orders available for preparation.\n");
+        return;
+    }
 
     int choice;
+    printf("Enter the number of the order to prepare (0 to cancel): ");
+    scanf("%d", &choice);
+
+    if (choice > 0 && choice <= available_count) {
+        int index = -1;
+        available_count = 0;
+        for (int i = 0; i < order_count; i++) {
+            if (order_list[i].status == 1 && order_list[i].chef_id == -1) {
+                available_count++;
+                if (available_count == choice) {
+                    index = i;
+                    break;
+                }
+            }
+        }
+
+        if (index != -1) {
+            printf("Enter the chef ID (1 to %d) to prepare this order: ", chef_count);
+            int chef_id;
+            scanf("%d", &chef_id);
+            if (chef_id > 0 && chef_id <= chef_count && chef_busy[chef_id - 1] == 0) {
+                order_list[index].chef_id = chef_id;
+                order_list[index].status = 3; // Preparing
+                get_current_time(order_list[index].start_time, MAX_NAME_LENGTH); // Record start time
+                chef_busy[chef_id - 1] = 1; // Mark chef as busy
+                printf("Order ID: %s is being prepared by Chef %d.\n", order_list[index].id, chef_id);
+                save_orders("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\S.txt");
+            } else {
+                printf("Invalid chef ID or chef is already busy. Skipping this order.\n");
+            }
+        }
+    } else if (choice == 0) {
+        printf("Action cancelled.\n");
+    } else {
+        printf("Invalid choice. Please try again.\n");
+    }
+}
+
+void complete_order_preparation() {
+    int chef_id;
+    printf("Enter your chef ID (1 to %d): ", chef_count);
+    scanf("%d", &chef_id);
+
+    if (chef_id < 1 || chef_id > chef_count) {
+        printf("Invalid chef ID. Please try again.\n");
+        return;
+    }
+
+    int found = 0;
+    for (int i = 0; i < order_count; i++) {
+        if (order_list[i].status == 3 && order_list[i].chef_id == chef_id) { // Only orders being prepared by this chef
+            printf("Order ID: %s is completed by Chef %d.\n", order_list[i].id, order_list[i].chef_id);
+            order_list[i].status = 2; // Completed
+            get_current_time(order_list[i].end_time, MAX_NAME_LENGTH); // Record end time
+            chef_busy[chef_id - 1] = 0; // Mark chef as available
+            found = 1;
+        }
+    }
+
+    if (!found) {
+        printf("Chef %d, you are not preparing anything now.\n", chef_id);
+    } else {
+        save_orders("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\S.txt");
+    }
+}
+
+void kitchen_application() {
+    int choice;
     do {
-        printf("\n1. Place Order\n2. View Orders\n3. View Menu\n4. Exit\nChoose an option: ");
+        printf("\n1. Choose Order to Prepare\n2. Complete Order Preparation\n3. Back to Main Menu\nChoose an option: ");
         scanf("%d", &choice);
         switch (choice) {
             case 1:
-                place_order(user);
+                choose_order_to_prepare();
                 break;
             case 2:
-                view_orders(user);
+                complete_order_preparation();
                 break;
             case 3:
-                view_menu();
+                printf("Returning to main menu.\n");
+                break;
+            default:
+                printf("Invalid choice. Please try again.\n");
+                break;
+        }
+    } while (choice != 3);
+}
+
+void customer_application() {
+    int choice;
+    char user_name[MAX_NAME_LENGTH];
+
+    printf("Enter your name: ");
+    scanf("%s", user_name);
+
+    do {
+        printf("\n1. New Order\n2. Current Order Status\n3. My Previous Orders\n4. Back to Main Menu\nChoose an option: ");
+        scanf("%d", &choice);
+        switch (choice) {
+            case 1:
+                view_menu_and_place_order();
+                break;
+            case 2:
+                view_current_order_status(user_name);
+                break;
+            case 3:
+                view_previous_orders(user_name);
                 break;
             case 4:
-                printf("Exiting customer application.\n");
+                printf("Returning to main menu.\n");
                 break;
             default:
                 printf("Invalid choice. Please try again.\n");
@@ -177,187 +567,32 @@ void customer_application() {
     } while (choice != 4);
 }
 
-void add_meal() {
-    Meal meal;
-    printf("Enter meal name: ");
-    scanf("%s", meal.name);
-    printf("Enter meal price: ");
-    scanf("%f", &meal.price);
-    printf("Enter preparation time: ");
-    scanf("%d", &meal.prep_time);
-    printf("Enter availability (1: available, 0: not available): ");
-    scanf("%d", &meal.available);
-
-    meal_list[meal_count++] = meal;
-    save_meals();
-    printf("Meal added.\n");
-}
-
-void update_meal() {
-    char meal_name[MAX_NAME_LENGTH];
-    int meal_index = -1;
-    printf("Enter meal name to update: ");
-    scanf("%s", meal_name);
-
-    for (int i = 0; i < meal_count; i++) {
-        if (strcmp(meal_list[i].name, meal_name) == 0) {
-            meal_index = i;
-            break;
-        }
-    }
-
-    if (meal_index == -1) {
-        printf("Meal not found.\n");
-        return;
-    }
-
-    printf("Enter new meal price: ");
-    scanf("%f", &meal_list[meal_index].price);
-    printf("Enter new preparation time: ");
-    scanf("%d", &meal_list[meal_index].prep_time);
-    printf("Enter new availability (1: available, 0: not available): ");
-    scanf("%d", &meal_list[meal_index].available);
-
-    save_meals();
-    printf("Meal updated.\n");
-}
-
-void delete_meal() {
-    char meal_name[MAX_NAME_LENGTH];
-    int meal_index = -1;
-    printf("Enter meal name to delete: ");
-    scanf("%s", meal_name);
-
-    for (int i = 0; i < meal_count; i++) {
-        if (strcmp(meal_list[i].name, meal_name) == 0) {
-            meal_index = i;
-            break;
-        }
-    }
-
-    if (meal_index == -1) {
-        printf("Meal not found.\n");
-        return;
-    }
-
-    for (int i = meal_index; i < meal_count - 1; i++) {
-        meal_list[i] = meal_list[i + 1];
-    }
-    meal_count--;
-
-    save_meals();
-    printf("Meal deleted.\n");
-}
-
-void approve_order() {
-    char order_id[MAX_NAME_LENGTH];
-    printf("Enter order ID to approve: ");
-    scanf("%s", order_id);
-
-    for (int i = 0; i < order_count; i++) {
-        if (strcmp(order_list[i].id, order_id) == 0) {
-            order_list[i].status = 1;
-            save_orders();
-            printf("Order approved.\n");
-            return;
-        }
-    }
-
-    printf("Order not found.\n");
-}
-
-void reject_order() {
-    char order_id[MAX_NAME_LENGTH];
-    printf("Enter order ID to reject: ");
-    scanf("%s", order_id);
-
-    for (int i = 0; i < order_count; i++) {
-        if (strcmp(order_list[i].id, order_id) == 0) {
-            order_list[i].status = -1;
-            save_orders();
-            printf("Order rejected.\n");
-            return;
-        }
-    }
-
-    printf("Order not found.\n");
-}
-
-void dailyOrders(){
-    FILE *fp = fopen("siparisler.txt", "r");
-    if (!fp) {
-        printf("Error opening file.\n");
-        return;
-    }
-    time_t t = time(NULL);
-    struct tm *tm = localtime(&t);
-    char day[25];
-    strftime(day, sizeof(day)-1, "%d-%m-%Y", tm);
-    char filename[20];
-    snprintf(filename, sizeof(filename), "%s.txt", day);
-    FILE *fdaily = fopen(filename, "w");
-    if (!fdaily) {
-        printf("Error opening file.\n");
-        return;
-    }
-    int i=0;
-    Order orders[100];
-    while(fscanf(fp, "%s %s %f %s %s %s %d", orders[i].id, orders[i].meal_name, orders[i].price, orders[i].order_time, orders[i].prep_time, orders[i].user, orders[i].status) != EOF){
-        if (strncmp(orders[i].order_time, day, 10) == 0){
-            fprintf(fdaily, "%s %s %.2f %s %s %s %d", orders[i].id, orders[i].meal_name, orders[i].price, orders[i].order_time, orders[i].prep_time, orders[i].user, orders[i].status);
-        }
-        i++;
-    }
-
-}
-
-void view_daily_report() {
-    time_t now = time(NULL);
-    struct tm *t = localtime(&now);
-    char today[MAX_NAME_LENGTH];
-    strftime(today, sizeof(today) - 1, "%d-%m-%Y", t);
-
-    printf("Daily Report for %s:\n", today);
-    for (int i = 0; i < order_count; i++) {
-        if (strncmp(order_list[i].order_time, today, 10) == 0) {
-            printf("%s %s %.2f TL %s %s %d\n",
-                   order_list[i].id, order_list[i].meal_name, order_list[i].price, order_list[i].order_time,
-                   order_list[i].prep_time, order_list[i].status);
-        }
-    }
-    dailyOrders();
-}
-
-
-
-
-
 void restaurant_application() {
     int choice;
     do {
-        printf("\n1. Add Meal\n2. Update Meal\n3. Delete Meal\n4. Approve Order\n5. Reject Order\n6. View Daily Report\n7. Exit\nChoose an option: ");
+        printf("\n1. Add Food\n2. Update Food\n3. Delete Food\n4. Approve/Reject Orders\n5. Generate Daily Report\n6. Generate Periodic Earnings Report\n7. Back to Main Menu\nChoose an option: ");
         scanf("%d", &choice);
         switch (choice) {
             case 1:
-                add_meal();
+                add_food();
                 break;
             case 2:
-                update_meal();
+                update_food();
                 break;
             case 3:
-                delete_meal();
+                delete_food();
                 break;
             case 4:
-                approve_order();
+                approve_or_reject_orders();
                 break;
             case 5:
-                reject_order();
+                generate_daily_report();
                 break;
             case 6:
-                view_daily_report();
+                generate_periodic_report();
                 break;
             case 7:
-                printf("Exiting restaurant application.\n");
+                printf("Returning to main menu.\n");
                 break;
             default:
                 printf("Invalid choice. Please try again.\n");
@@ -366,39 +601,9 @@ void restaurant_application() {
     } while (choice != 7);
 }
 
-void view_pending_orders() {
-    printf("Pending Orders:\n");
-    for (int i = 0; i < order_count; i++) {
-        if (order_list[i].status == 0) {
-            printf("Order ID: %s, Meal: %s, Price: %.2f TL, Order Time: %s, Preparation Time: %s, User: %s\n",
-                   order_list[i].id, order_list[i].meal_name, order_list[i].price, order_list[i].order_time,
-                   order_list[i].prep_time, order_list[i].user);
-        }
-    }
-}
-
-void kitchen_application() {
-    int choice;
-    do {
-        printf("\n1. View Pending Orders\n2. Exit\nChoose an option: ");
-        scanf("%d", &choice);
-        switch (choice) {
-            case 1:
-                view_pending_orders();
-                break;
-            case 2:
-                printf("Exiting kitchen application.\n");
-                break;
-            default:
-                printf("Invalid choice. Please try again.\n");
-                break;
-        }
-    } while (choice != 2);
-}
-
 int main() {
-    load_meals();
-    load_orders();
+    load_meals("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\yemeklistesi.txt");
+    load_orders("C:\\Users\\fadee\\OneDrive\\Documents\\Com. Eng. Books\\C\\RR\\S.txt");
 
     int choice;
     do {
